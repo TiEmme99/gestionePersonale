@@ -1,18 +1,29 @@
 import tkinter as tk
 from tkinter import messagebox
 import sqlite3
+import openpyxl
+from openpyxl import Workbook
 
 # Costanti per i giorni della settimana
 GIORNI_SETTIMANA = ["Lunedì", "Martedì", "Mercoledì", "Giovedì", "Venerdì", "Sabato", "Domenica"]
 
 # Classe Dipendente per gestire le informazioni sui dipendenti
 class Dipendente:
-    def __init__(self, nome, ore_disponibili):
+    def __init__(self, nome, ore_disponibili, ruoli=None):
         self.nome = nome
         self.ore_disponibili = ore_disponibili
+        self.ruoli = ruoli if ruoli else []  # Lista di ruoli associati al dipendente
 
     def __str__(self):
-        return f"{self.nome} - Ore disponibili: {self.ore_disponibili}"
+        return f"{self.nome} - Ore disponibili: {self.ore_disponibili} - Ruoli: {', '.join(self.ruoli)}"
+
+# Classe Ruolo per gestire le informazioni sui ruoli
+class Ruolo:
+    def __init__(self, nome):
+        self.nome = nome
+
+    def __str__(self):
+        return f"Ruolo: {self.nome}"
 
 # Classe Ristorante per gestire gli orari settimanali del ristorante
 class Ristorante:
@@ -50,84 +61,147 @@ class Ristorante:
             orari_str += f"{giorno}: Apertura: {orari['apertura']}, Chiusura: {orari['chiusura']}\n"
         return orari_str
 
-# Classe GestioneRistorante per gestire i dipendenti e gli orari del ristorante
+# Classe GestioneRistorante per gestire dipendenti, ruoli e stanze
 class GestioneRistorante:
     def __init__(self, connection):
         self.connection = connection
         self.dipendenti = []
+        self.stanze = []  # Lista di stanze
+        self.ruoli = []  # Lista di ruoli
+        self.num_persone_stanze_ruolo = {}  # Dizionario che associa stanze a numero di persone per ruolo
         self.orari = Ristorante(connection)
         self.carica_dipendenti_da_db()
+        self.carica_ruoli_da_db()
 
+    # Carica dipendenti dal database
     def carica_dipendenti_da_db(self):
-        # Recupera i dipendenti dal database
         cursor = self.connection.cursor()
-        cursor.execute("SELECT nome, ore_disponibili FROM dipendenti")
+        cursor.execute("""
+            SELECT d.nome, d.ore_disponibili, r.nome FROM dipendenti d
+            LEFT JOIN dipendenti_ruoli dr ON d.nome = dr.dipendente_nome
+            LEFT JOIN ruoli r ON dr.ruolo_nome = r.nome
+        """)
         rows = cursor.fetchall()
-        self.dipendenti = [Dipendente(nome, ore_disponibili) for nome, ore_disponibili in rows]
+        dipendenti_dict = {}
+        for nome, ore_disponibili, ruolo in rows:
+            if nome not in dipendenti_dict:
+                dipendenti_dict[nome] = Dipendente(nome, ore_disponibili, [])
+            if ruolo:
+                dipendenti_dict[nome].ruoli.append(ruolo)
+        self.dipendenti = list(dipendenti_dict.values())
 
-    def aggiungi_dipendente(self, nome, ore_disponibili):
-        dipendente = Dipendente(nome, ore_disponibili)
+    # Carica ruoli dal database
+    def carica_ruoli_da_db(self):
+        cursor = self.connection.cursor()
+        cursor.execute("SELECT nome FROM ruoli")
+        rows = cursor.fetchall()
+        self.ruoli = [Ruolo(nome) for nome, in rows]
+
+    # CRUD Dipendenti
+    def aggiungi_dipendente(self, nome, ore_disponibili, ruoli):
+        dipendente = Dipendente(nome, ore_disponibili, ruoli)
         self.dipendenti.append(dipendente)
-        # Inserisce il nuovo dipendente nel database
         cursor = self.connection.cursor()
         cursor.execute(
             "INSERT INTO dipendenti (nome, ore_disponibili) VALUES (?, ?)",
             (nome, ore_disponibili)
         )
+        for ruolo in ruoli:
+            cursor.execute(
+                "INSERT INTO dipendenti_ruoli (dipendente_nome, ruolo_nome) VALUES (?, ?)",
+                (nome, ruolo)
+            )
         self.connection.commit()
 
     def rimuovi_dipendente(self, nome):
         self.dipendenti = [d for d in self.dipendenti if d.nome != nome]
-        # Rimuove il dipendente dal database
         cursor = self.connection.cursor()
         cursor.execute("DELETE FROM dipendenti WHERE nome=?", (nome,))
+        cursor.execute("DELETE FROM dipendenti_ruoli WHERE dipendente_nome=?", (nome,))
         self.connection.commit()
 
-    def modifica_ore_dipendente(self, nome, nuove_ore):
-        for dipendente in self.dipendenti:
-            if dipendente.nome == nome:
-                dipendente.ore_disponibili = nuove_ore
-                break
-        # Aggiorna le ore del dipendente nel database
+    def modifica_dipendente(self, vecchio_nome, nuovo_nome, nuove_ore, nuovi_ruoli):
         cursor = self.connection.cursor()
-        cursor.execute(
-            "UPDATE dipendenti SET ore_disponibili=? WHERE nome=?",
-            (nuove_ore, nome)
-        )
+        cursor.execute("UPDATE dipendenti SET nome=?, ore_disponibili=? WHERE nome=?", (nuovo_nome, nuove_ore, vecchio_nome))
+        cursor.execute("DELETE FROM dipendenti_ruoli WHERE dipendente_nome=?", (vecchio_nome,))
+        for ruolo in nuovi_ruoli:
+            cursor.execute("INSERT INTO dipendenti_ruoli (dipendente_nome, ruolo_nome) VALUES (?, ?)", (nuovo_nome, ruolo))
         self.connection.commit()
 
-    def modifica_orari_ristorante(self, giorno, apertura, chiusura):
-        return self.orari.modifica_orario_giorno(giorno, apertura, chiusura)
+    # CRUD Ruoli
+    def aggiungi_ruolo(self, nome):
+        ruolo = Ruolo(nome)
+        self.ruoli.append(ruolo)
+        cursor = self.connection.cursor()
+        cursor.execute("INSERT INTO ruoli (nome) VALUES (?)", (nome,))
+        self.connection.commit()
 
+    def rimuovi_ruolo(self, nome):
+        self.ruoli = [r for r in self.ruoli if r.nome != nome]
+        cursor = self.connection.cursor()
+        cursor.execute("DELETE FROM ruoli WHERE nome=?", (nome,))
+        self.connection.commit()
+
+    # CRUD Stanze
+    def aggiungi_stanza(self, nome_stanza, persone_ruoli):
+        self.stanze.append(nome_stanza)
+        self.num_persone_stanze_ruolo[nome_stanza] = persone_ruoli
+        cursor = self.connection.cursor()
+        cursor.execute("INSERT INTO stanze (nome) VALUES (?)", (nome_stanza,))
+        for ruolo, numero_persone in persone_ruoli.items():
+            cursor.execute(
+                "INSERT INTO stanze_ruoli (stanza_nome, ruolo_nome, numero_persone) VALUES (?, ?, ?)",
+                (nome_stanza, ruolo, numero_persone)
+            )
+        self.connection.commit()
+
+    def modifica_stanza(self, nome_stanza, persone_ruoli):
+        self.num_persone_stanze_ruolo[nome_stanza] = persone_ruoli
+        cursor = self.connection.cursor()
+        cursor.execute("DELETE FROM stanze_ruoli WHERE stanza_nome=?", (nome_stanza,))
+        for ruolo, numero_persone in persone_ruoli.items():
+            cursor.execute(
+                "INSERT INTO stanze_ruoli (stanza_nome, ruolo_nome, numero_persone) VALUES (?, ?, ?)",
+                (nome_stanza, ruolo, numero_persone)
+            )
+        self.connection.commit()
+
+    def rimuovi_stanza(self, nome_stanza):
+        self.stanze.remove(nome_stanza)
+        del self.num_persone_stanze_ruolo[nome_stanza]
+        cursor = self.connection.cursor()
+        cursor.execute("DELETE FROM stanze WHERE nome=?", (nome_stanza,))
+        cursor.execute("DELETE FROM stanze_ruoli WHERE stanza_nome=?", (nome_stanza,))
+        self.connection.commit()
+
+    # Pianificazione settimanale
     def genera_pianificazione_settimanale(self):
         pianificazione = []
-        
-        # Copia temporanea degli oggetti Dipendente per la pianificazione
-        dipendenti_copia = [Dipendente(d.nome, d.ore_disponibili) for d in self.dipendenti]
+        dipendenti_copia = [Dipendente(d.nome, d.ore_disponibili, d.ruoli) for d in self.dipendenti]
 
         for giorno in GIORNI_SETTIMANA:
             ore_giornaliere = self.calcola_ore_giornaliere(giorno)
             ore_giornaliere_rimanenti = ore_giornaliere
             giorno_pianificazione = []
 
-            for dipendente in dipendenti_copia:
-                if ore_giornaliere_rimanenti <= 0:
-                    break
-                ore_assegnabili = min(dipendente.ore_disponibili, ore_giornaliere_rimanenti)
-                giorno_pianificazione.append((dipendente.nome, ore_assegnabili))
-                dipendente.ore_disponibili -= ore_assegnabili
-                ore_giornaliere_rimanenti -= ore_assegnabili
+            for stanza, persone_ruoli in self.num_persone_stanze_ruolo.items():
+                for ruolo, persone_necessarie in persone_ruoli.items():
+                    persone_assegnate = []
+                    while persone_necessarie > 0 and ore_giornaliere_rimanenti > 0 and dipendenti_copia:
+                        dipendente = next((d for d in dipendenti_copia if ruolo in d.ruoli), None)
+                        if not dipendente:
+                            break
+                        ore_assegnabili = min(dipendente.ore_disponibili, ore_giornaliere_rimanenti)
+                        if ore_assegnabili > 0:
+                            persone_assegnate.append((dipendente.nome, ore_assegnabili, ruolo))
+                            dipendente.ore_disponibili -= ore_assegnabili
+                            ore_giornaliere_rimanenti -= ore_assegnabili
+                            persone_necessarie -= 1
+
+                    giorno_pianificazione.append((stanza, persone_assegnate))
 
             pianificazione.append((giorno, giorno_pianificazione))
-
-        output = ""
-        for giorno, assegnazioni in pianificazione:
-            output += f"{giorno}:\n"
-            for dipendente, ore in assegnazioni:
-                output += f"  {dipendente}: {ore} ore\n"
-            output += "\n"
-
-        return output
+        return pianificazione
 
     def calcola_ore_giornaliere(self, giorno):
         orari = self.orari.orari_settimanali[giorno]
@@ -138,116 +212,188 @@ class GestioneRistorante:
         ore_giornaliere = (chiusura_totale_minuti - apertura_totale_minuti) / 60
         return max(0, ore_giornaliere)  # Assicura che le ore non siano negative
 
-    def visualizza_dipendenti(self):
-        return [str(dipendente) for dipendente in self.dipendenti]
+    def esporta_pianificazione_excel(self, file_path="pianificazione_settimanale.xlsx"):
+        pianificazione = self.genera_pianificazione_settimanale()
+        wb = Workbook()
+        
+        for giorno, assegnazioni in pianificazione:
+            ws = wb.create_sheet(title=giorno)
+            ws.append(["Stanza", "Dipendente", "Ore", "Ruolo"])
+            for stanza, persone_assegnate in assegnazioni:
+                for dipendente, ore, ruolo in persone_assegnate:
+                    ws.append([stanza, dipendente, ore, ruolo])
+        
+        if 'Sheet' in wb.sheetnames:
+            wb.remove(wb['Sheet'])
 
-    def visualizza_orari_ristorante(self):
-        return str(self.orari)
-
+        wb.save(file_path)
 
 # Classe principale dell'applicazione GUI per la gestione del ristorante
 class GestioneRistoranteApp:
     def __init__(self, root):
-        # Connessione al database SQLite
         self.connection = sqlite3.connect('gestione_ristorante.db')
         self.crea_tabelle()
 
-        # Creazione dell'oggetto GestioneRistorante
         self.gestione = GestioneRistorante(self.connection)
 
-        # Creazione della finestra principale
         self.root = root
         self.root.title("Gestione Ristorante")
-        self.root.geometry("600x700")
+        self.root.minsize(1200, 600)
 
-        # Tabella per i dipendenti
-        self.frame_dipendenti = tk.Frame(self.root)
-        self.frame_dipendenti.pack(pady=10)
+        # Crea una finestra con scrollbar verticale
+        self.canvas = tk.Canvas(self.root)
+        self.scrollbar = tk.Scrollbar(self.root, orient="vertical", command=self.canvas.yview)
+        self.scrollable_frame = tk.Frame(self.canvas)
 
-        self.label_dipendenti = tk.Label(self.frame_dipendenti, text="Gestione Dipendenti", font=("Helvetica", 16))
-        self.label_dipendenti.pack()
+        self.scrollable_frame.bind(
+            "<Configure>",
+            lambda e: self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+        )
 
-        self.label_nome = tk.Label(self.frame_dipendenti, text="Nome Dipendente:")
-        self.label_nome.pack()
+        self.canvas.create_window((0, 0), window=self.scrollable_frame, anchor="nw")
+        self.canvas.configure(yscrollcommand=self.scrollbar.set)
 
-        self.entry_nome = tk.Entry(self.frame_dipendenti)
-        self.entry_nome.pack()
+        self.canvas.pack(side="left", fill="both", expand=True)
+        self.scrollbar.pack(side="right", fill="y")
 
-        self.label_ore = tk.Label(self.frame_dipendenti, text="Ore Settimanali Disponibili:")
-        self.label_ore.pack()
+        self.scrollable_frame.grid_columnconfigure(0, weight=1)
+        self.scrollable_frame.grid_columnconfigure(1, weight=1)
 
-        self.entry_ore = tk.Entry(self.frame_dipendenti)
-        self.entry_ore.pack()
+        # CRUD dipendenti (a sinistra)
+        self.frame_personale = tk.Frame(self.scrollable_frame, bd=2, relief="groove")
+        self.frame_personale.grid(row=0, column=0, sticky="nsew", padx=10, pady=10)
 
-        self.button_aggiungi = tk.Button(self.frame_dipendenti, text="Aggiungi Dipendente", command=self.aggiungi_dipendente)
-        self.button_aggiungi.pack(pady=5)
+        self.label_personale = tk.Label(self.frame_personale, text="Gestione Personale", font=("Helvetica", 16))
+        self.label_personale.grid(row=0, column=0, columnspan=2, sticky="ew")
 
-        self.button_rimuovi = tk.Button(self.frame_dipendenti, text="Rimuovi Dipendente", command=self.rimuovi_dipendente)
-        self.button_rimuovi.pack(pady=5)
+        self.label_nome = tk.Label(self.frame_personale, text="Nome:")
+        self.label_nome.grid(row=1, column=0, sticky="e")
 
-        self.button_modifica = tk.Button(self.frame_dipendenti, text="Modifica Ore Dipendente", command=self.modifica_ore_dipendente)
-        self.button_modifica.pack(pady=5)
+        self.entry_nome = tk.Entry(self.frame_personale)
+        self.entry_nome.grid(row=1, column=1, sticky="ew")
 
-        self.listbox_dipendenti = tk.Listbox(self.frame_dipendenti, width=50)
-        self.listbox_dipendenti.pack(pady=5)
+        self.label_ore = tk.Label(self.frame_personale, text="Ore Settimanali:")
+        self.label_ore.grid(row=2, column=0, sticky="e")
 
-        # Tabella per gli orari settimanali
-        self.frame_orari = tk.Frame(self.root)
-        self.frame_orari.pack(pady=10)
+        self.entry_ore = tk.Entry(self.frame_personale)
+        self.entry_ore.grid(row=2, column=1, sticky="ew")
 
-        self.label_orari = tk.Label(self.frame_orari, text="Orari Settimanali del Ristorante", font=("Helvetica", 16))
-        self.label_orari.pack()
+        self.label_ruolo_personale = tk.Label(self.frame_personale, text="Ruolo:")
+        self.label_ruolo_personale.grid(row=3, column=0, sticky="e")
 
-        self.orari_inputs = {}
-        for giorno in GIORNI_SETTIMANA:
-            frame_giorno = tk.Frame(self.frame_orari)
-            frame_giorno.pack(pady=5)
+        self.listbox_ruoli_personale = tk.Listbox(self.frame_personale, selectmode=tk.MULTIPLE)
+        self.listbox_ruoli_personale.grid(row=3, column=1, sticky="ew")
 
-            label_giorno = tk.Label(frame_giorno, text=giorno)
-            label_giorno.grid(row=0, column=0, padx=5)
+        self.button_aggiungi_personale = tk.Button(self.frame_personale, text="Aggiungi Personale", command=self.aggiungi_personale)
+        self.button_aggiungi_personale.grid(row=4, column=0, columnspan=2, sticky="ew")
 
-            label_apertura = tk.Label(frame_giorno, text="Apertura:")
-            label_apertura.grid(row=0, column=1, padx=5)
+        self.listbox_personale = tk.Listbox(self.frame_personale, width=40)
+        self.listbox_personale.grid(row=5, column=0, columnspan=2, sticky="ew")
 
-            entry_apertura = tk.Entry(frame_giorno, width=10)
-            entry_apertura.grid(row=0, column=2, padx=5)
+        self.button_rimuovi_personale = tk.Button(self.frame_personale, text="Rimuovi Personale", command=self.rimuovi_personale)
+        self.button_rimuovi_personale.grid(row=6, column=0, columnspan=2, sticky="ew")
 
-            label_chiusura = tk.Label(frame_giorno, text="Chiusura:")
-            label_chiusura.grid(row=0, column=3, padx=5)
+        self.button_modifica_personale = tk.Button(self.frame_personale, text="Modifica Personale", command=self.modifica_personale)
+        self.button_modifica_personale.grid(row=7, column=0, columnspan=2, sticky="ew")
 
-            entry_chiusura = tk.Entry(frame_giorno, width=10)
-            entry_chiusura.grid(row=0, column=4, padx=5)
+        # CRUD stanze (a destra)
+        self.frame_stanze = tk.Frame(self.scrollable_frame, bd=2, relief="groove")
+        self.frame_stanze.grid(row=0, column=1, sticky="nsew", padx=10, pady=10)
 
-            self.orari_inputs[giorno] = {"apertura": entry_apertura, "chiusura": entry_chiusura}
+        self.label_stanze = tk.Label(self.frame_stanze, text="Gestione Stanze", font=("Helvetica", 16))
+        self.label_stanze.grid(row=0, column=0, columnspan=2, sticky="ew")
 
-        self.button_modifica_orari = tk.Button(self.frame_orari, text="Modifica Orari Settimanali", command=self.modifica_orari)
-        self.button_modifica_orari.pack(pady=5)
+        self.label_nome_stanza = tk.Label(self.frame_stanze, text="Nome Stanza:")
+        self.label_nome_stanza.grid(row=1, column=0, sticky="e")
 
-        self.label_orari_attuali = tk.Label(self.frame_orari, text="")
-        self.label_orari_attuali.pack()
+        self.entry_nome_stanza = tk.Entry(self.frame_stanze)
+        self.entry_nome_stanza.grid(row=1, column=1, sticky="ew")
 
-        # Output della pianificazione settimanale
-        self.frame_pianificazione = tk.Frame(self.root)
-        self.frame_pianificazione.pack(pady=10)
+        self.label_num_persone_ruolo = tk.Label(self.frame_stanze, text="Numero di persone per ruolo:")
+        self.label_num_persone_ruolo.grid(row=2, column=0, sticky="e")
 
-        self.button_pianificazione = tk.Button(self.frame_pianificazione, text="Genera Pianificazione Settimanale", command=self.genera_pianificazione)
-        self.button_pianificazione.pack(pady=5)
+        self.listbox_ruoli_stanze = tk.Listbox(self.frame_stanze, selectmode=tk.SINGLE)
+        self.listbox_ruoli_stanze.grid(row=2, column=1, sticky="ew")
 
-        self.text_pianificazione = tk.Text(self.frame_pianificazione, height=10, width=60)
-        self.text_pianificazione.pack()
+        self.entry_num_persone_ruolo = tk.Entry(self.frame_stanze)
+        self.entry_num_persone_ruolo.grid(row=3, column=1, sticky="ew")
 
-        # Aggiornamento iniziale della UI
-        self.aggiorna_lista_dipendenti()
-        self.aggiorna_orari_ristorante()
+        self.button_aggiungi_stanza = tk.Button(self.frame_stanze, text="Aggiungi Stanza", command=self.aggiungi_stanza)
+        self.button_aggiungi_stanza.grid(row=4, column=0, columnspan=2, sticky="ew")
+
+        self.listbox_stanze = tk.Listbox(self.frame_stanze, width=40)
+        self.listbox_stanze.grid(row=5, column=0, columnspan=2, sticky="ew")
+
+        self.button_rimuovi_stanza = tk.Button(self.frame_stanze, text="Rimuovi Stanza", command=self.rimuovi_stanza)
+        self.button_rimuovi_stanza.grid(row=6, column=0, columnspan=2, sticky="ew")
+
+        # Gestione Ruoli (sotto)
+        self.frame_ruoli = tk.Frame(self.scrollable_frame, bd=2, relief="groove")
+        self.frame_ruoli.grid(row=1, column=0, columnspan=2, sticky="nsew", padx=10, pady=10)
+
+        self.label_ruoli = tk.Label(self.frame_ruoli, text="Gestione Ruoli", font=("Helvetica", 16))
+        self.label_ruoli.grid(row=0, column=0, columnspan=2, sticky="ew")
+
+        self.label_nome_ruolo = tk.Label(self.frame_ruoli, text="Nome Ruolo:")
+        self.label_nome_ruolo.grid(row=1, column=0, sticky="e")
+
+        self.entry_nome_ruolo = tk.Entry(self.frame_ruoli)
+        self.entry_nome_ruolo.grid(row=1, column=1, sticky="ew")
+
+        self.button_aggiungi_ruolo = tk.Button(self.frame_ruoli, text="Aggiungi Ruolo", command=self.aggiungi_ruolo)
+        self.button_aggiungi_ruolo.grid(row=2, column=0, columnspan=2, sticky="ew")
+
+        self.listbox_ruoli = tk.Listbox(self.frame_ruoli, width=40)
+        self.listbox_ruoli.grid(row=3, column=0, columnspan=2, sticky="ew")
+
+        self.button_rimuovi_ruolo = tk.Button(self.frame_ruoli, text="Rimuovi Ruolo", command=self.rimuovi_ruolo)
+        self.button_rimuovi_ruolo.grid(row=4, column=0, columnspan=2, sticky="ew")
+
+        # Esportazione in Excel
+        self.button_export_excel = tk.Button(self.frame_ruoli, text="Esporta Pianificazione in Excel",
+                                             command=self.esporta_pianificazione_excel)
+        self.button_export_excel.grid(row=5, column=0, columnspan=2, sticky="ew")
+
+        # Aggiorna le liste
+        self.aggiorna_lista_personale()
+        self.aggiorna_lista_stanze()
+        self.aggiorna_lista_ruoli()
 
     def crea_tabelle(self):
-        # Creazione delle tabelle nel database SQLite se non esistono
         cursor = self.connection.cursor()
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS dipendenti (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 nome TEXT NOT NULL,
                 ore_disponibili INTEGER NOT NULL
+            )
+        """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS ruoli (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                nome TEXT UNIQUE NOT NULL
+            )
+        """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS dipendenti_ruoli (
+                dipendente_nome TEXT NOT NULL,
+                ruolo_nome TEXT NOT NULL,
+                FOREIGN KEY (dipendente_nome) REFERENCES dipendenti(nome),
+                FOREIGN KEY (ruolo_nome) REFERENCES ruoli(nome)
+            )
+        """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS stanze (
+                nome TEXT PRIMARY KEY
+            )
+        """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS stanze_ruoli (
+                stanza_nome TEXT NOT NULL,
+                ruolo_nome TEXT NOT NULL,
+                numero_persone INTEGER NOT NULL,
+                FOREIGN KEY (stanza_nome) REFERENCES stanze(nome),
+                FOREIGN KEY (ruolo_nome) REFERENCES ruoli(nome)
             )
         """)
         cursor.execute("""
@@ -259,24 +405,14 @@ class GestioneRistoranteApp:
         """)
         self.connection.commit()
 
-        # Inserimento di orari default se non esistono
-        cursor.execute("SELECT COUNT(*) FROM orari_settimanali")
-        count = cursor.fetchone()[0]
-        if count == 0:
-            for giorno in GIORNI_SETTIMANA:
-                cursor.execute(
-                    "INSERT INTO orari_settimanali (giorno, apertura, chiusura) VALUES (?, ?, ?)",
-                    (giorno, "09:00", "17:00")
-                )
-            self.connection.commit()
-
-    def aggiungi_dipendente(self):
+    def aggiungi_personale(self):
         nome = self.entry_nome.get()
         try:
             ore_disponibili = int(self.entry_ore.get())
+            ruoli_selezionati = [self.listbox_ruoli_personale.get(i) for i in self.listbox_ruoli_personale.curselection()]
             if nome and ore_disponibili >= 0:
-                self.gestione.aggiungi_dipendente(nome, ore_disponibili)
-                self.aggiorna_lista_dipendenti()
+                self.gestione.aggiungi_dipendente(nome, ore_disponibili, ruoli_selezionati)
+                self.aggiorna_lista_personale()
                 self.entry_nome.delete(0, tk.END)
                 self.entry_ore.delete(0, tk.END)
             else:
@@ -284,62 +420,94 @@ class GestioneRistoranteApp:
         except ValueError:
             messagebox.showerror("Errore", "Le ore devono essere un numero intero!")
 
-    def rimuovi_dipendente(self):
-        nome = self.entry_nome.get()
-        self.gestione.rimuovi_dipendente(nome)
-        self.aggiorna_lista_dipendenti()
-        self.entry_nome.delete(0, tk.END)
-
-    def modifica_ore_dipendente(self):
-        nome = self.entry_nome.get()
+    def rimuovi_personale(self):
         try:
+            nome = self.listbox_personale.get(tk.ACTIVE).split(" - ")[0]
+            self.gestione.rimuovi_dipendente(nome)
+            self.aggiorna_lista_personale()
+        except IndexError:
+            messagebox.showerror("Errore", "Seleziona un dipendente dalla lista.")
+
+    def modifica_personale(self):
+        try:
+            nome_selezionato = self.listbox_personale.get(tk.ACTIVE).split(" - ")[0]
+            nuovo_nome = self.entry_nome.get()
             nuove_ore = int(self.entry_ore.get())
-            if nome and nuove_ore >= 0:
-                self.gestione.modifica_ore_dipendente(nome, nuove_ore)
-                self.aggiorna_lista_dipendenti()
+            ruoli_selezionati = [self.listbox_ruoli_personale.get(i) for i in self.listbox_ruoli_personale.curselection()]
+
+            if nuovo_nome and nuove_ore >= 0:
+                self.gestione.modifica_dipendente(nome_selezionato, nuovo_nome, nuove_ore, ruoli_selezionati)
+                self.aggiorna_lista_personale()
                 self.entry_nome.delete(0, tk.END)
                 self.entry_ore.delete(0, tk.END)
             else:
                 messagebox.showerror("Errore", "Nome o ore non validi!")
-        except ValueError:
-            messagebox.showerror("Errore", "Le ore devono essere un numero intero!")
+        except (ValueError, IndexError):
+            messagebox.showerror("Errore", "Seleziona un dipendente e inserisci valori validi.")
 
-    def modifica_orari(self):
-        orari_settimanali = {}
-        for giorno, widgets in self.orari_inputs.items():
-            apertura = widgets["apertura"].get()
-            chiusura = widgets["chiusura"].get()
-            if self.valida_orari(apertura) and self.valida_orari(chiusura):
-                orari_settimanali[giorno] = (apertura, chiusura)
-            else:
-                messagebox.showerror("Errore", f"Gli orari per {giorno} non sono validi. Devono essere nel formato HH:MM.")
-                return
-        
-        for giorno, (apertura, chiusura) in orari_settimanali.items():
-            self.gestione.modifica_orari_ristorante(giorno, apertura, chiusura)
-        
-        self.aggiorna_orari_ristorante()
+    def aggiorna_lista_personale(self):
+        self.listbox_personale.delete(0, tk.END)
+        for dipendente in self.gestione.dipendenti:
+            self.listbox_personale.insert(tk.END, str(dipendente))
 
-    def valida_orari(self, orario):
+    def aggiungi_stanza(self):
+        nome_stanza = self.entry_nome_stanza.get()
         try:
-            ore, minuti = map(int, orario.split(':'))
-            return 0 <= ore <= 23 and 0 <= minuti <= 59
+            ruolo = self.listbox_ruoli_stanze.get(tk.ACTIVE)
+            num_persone = int(self.entry_num_persone_ruolo.get())
+            persone_ruoli = {ruolo: num_persone}
+            if nome_stanza and num_persone > 0:
+                self.gestione.aggiungi_stanza(nome_stanza, persone_ruoli)
+                self.aggiorna_lista_stanze()
+                self.entry_nome_stanza.delete(0, tk.END)
+                self.entry_num_persone_ruolo.delete(0, tk.END)
+            else:
+                messagebox.showerror("Errore", "Nome della stanza o numero di persone non validi!")
         except ValueError:
-            return False
+            messagebox.showerror("Errore", "Il numero di persone deve essere un numero intero positivo!")
 
-    def aggiorna_lista_dipendenti(self):
-        self.listbox_dipendenti.delete(0, tk.END)
-        for dipendente in self.gestione.visualizza_dipendenti():
-            self.listbox_dipendenti.insert(tk.END, dipendente)
+    def rimuovi_stanza(self):
+        nome_stanza = self.entry_nome_stanza.get()
+        self.gestione.rimuovi_stanza(nome_stanza)
+        self.aggiorna_lista_stanze()
+        self.entry_nome_stanza.delete(0, tk.END)
 
-    def aggiorna_orari_ristorante(self):
-        orari = self.gestione.visualizza_orari_ristorante()
-        self.label_orari_attuali.config(text=orari)
+    def aggiorna_lista_stanze(self):
+        self.listbox_stanze.delete(0, tk.END)
+        for stanza in self.gestione.stanze:
+            persone_ruoli = self.gestione.num_persone_stanze_ruolo[stanza]
+            descrizione_stanza = f"{stanza}: {', '.join([f'{ruolo} ({num})' for ruolo, num in persone_ruoli.items()])}"
+            self.listbox_stanze.insert(tk.END, descrizione_stanza)
 
-    def genera_pianificazione(self):
-        pianificazione = self.gestione.genera_pianificazione_settimanale()
-        self.text_pianificazione.delete(1.0, tk.END)
-        self.text_pianificazione.insert(tk.END, pianificazione)
+    def aggiungi_ruolo(self):
+        nome_ruolo = self.entry_nome_ruolo.get()
+        if nome_ruolo:
+            self.gestione.aggiungi_ruolo(nome_ruolo)
+            self.aggiorna_lista_ruoli()
+            self.entry_nome_ruolo.delete(0, tk.END)
+        else:
+            messagebox.showerror("Errore", "Inserisci un nome per il ruolo!")
+
+    def rimuovi_ruolo(self):
+        nome_ruolo = self.listbox_ruoli.get(tk.ACTIVE)
+        if nome_ruolo:
+            self.gestione.rimuovi_ruolo(nome_ruolo)
+            self.aggiorna_lista_ruoli()
+        else:
+            messagebox.showerror("Errore", "Seleziona un ruolo dalla lista!")
+
+    def aggiorna_lista_ruoli(self):
+        self.listbox_ruoli.delete(0, tk.END)
+        self.listbox_ruoli_personale.delete(0, tk.END)
+        self.listbox_ruoli_stanze.delete(0, tk.END)
+        for ruolo in self.gestione.ruoli:
+            self.listbox_ruoli.insert(tk.END, ruolo.nome)
+            self.listbox_ruoli_personale.insert(tk.END, ruolo.nome)
+            self.listbox_ruoli_stanze.insert(tk.END, ruolo.nome)
+
+    def esporta_pianificazione_excel(self):
+        self.gestione.esporta_pianificazione_excel()
+        messagebox.showinfo("Esportazione completata", "La pianificazione settimanale è stata esportata in Excel.")
 
 if __name__ == "__main__":
     root = tk.Tk()
