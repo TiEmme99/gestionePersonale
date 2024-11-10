@@ -33,25 +33,30 @@ class Ristorante:
         self.carica_orari_da_db()
 
     def carica_orari_da_db(self):
-        # Recupera gli orari settimanali dal database
-        cursor = self.connection.cursor()
-        cursor.execute("SELECT giorno, apertura, chiusura FROM orari_settimanali")
-        rows = cursor.fetchall()
-        for row in rows:
-            giorno, apertura, chiusura = row
-            self.orari_settimanali[giorno] = {"apertura": apertura, "chiusura": chiusura}
+        try:
+            cursor = self.connection.cursor()
+            cursor.execute("SELECT giorno, apertura, chiusura FROM orari_settimanali")
+            rows = cursor.fetchall()
+            for row in rows:
+                giorno, apertura, chiusura = row
+                self.orari_settimanali[giorno] = {"apertura": apertura, "chiusura": chiusura}
+        except sqlite3.Error as e:
+            print("Errore nel caricamento degli orari:", e)
 
     def modifica_orario_giorno(self, giorno, apertura, chiusura):
         if giorno in GIORNI_SETTIMANA:
             self.orari_settimanali[giorno] = {"apertura": apertura, "chiusura": chiusura}
-            # Aggiorna il database con i nuovi orari
-            cursor = self.connection.cursor()
-            cursor.execute(
-                "UPDATE orari_settimanali SET apertura=?, chiusura=? WHERE giorno=?",
-                (apertura, chiusura, giorno)
-            )
-            self.connection.commit()
-            return True
+            try:
+                cursor = self.connection.cursor()
+                cursor.execute(
+                    "UPDATE orari_settimanali SET apertura=?, chiusura=? WHERE giorno=?",
+                    (apertura, chiusura, giorno)
+                )
+                self.connection.commit()
+                return True
+            except sqlite3.Error as e:
+                print("Errore nella modifica degli orari:", e)
+                return False
         return False
 
     def __str__(self):
@@ -75,27 +80,35 @@ class GestioneRistorante:
 
     # Carica dipendenti dal database
     def carica_dipendenti_da_db(self):
-        cursor = self.connection.cursor()
-        cursor.execute("""
-            SELECT d.nome, d.ore_disponibili, r.nome FROM dipendenti d
-            LEFT JOIN dipendenti_ruoli dr ON d.nome = dr.dipendente_nome
-            LEFT JOIN ruoli r ON dr.ruolo_nome = r.nome
-        """)
-        rows = cursor.fetchall()
-        dipendenti_dict = {}
-        for nome, ore_disponibili, ruolo in rows:
-            if nome not in dipendenti_dict:
-                dipendenti_dict[nome] = Dipendente(nome, ore_disponibili, [])
-            if ruolo:
-                dipendenti_dict[nome].ruoli.append(ruolo)
-        self.dipendenti = list(dipendenti_dict.values())
+        try:
+            cursor = self.connection.cursor()
+            cursor.execute("""
+                SELECT d.nome, d.ore_disponibili, r.nome FROM dipendenti d
+                LEFT JOIN dipendenti_ruoli dr ON d.nome = dr.dipendente_nome
+                LEFT JOIN ruoli r ON dr.ruolo_nome = r.nome
+            """)
+            rows = cursor.fetchall()
+            dipendenti_dict = {}
+            for nome, ore_disponibili, ruolo in rows:
+                if nome not in dipendenti_dict:
+                    dipendenti_dict[nome] = Dipendente(nome, ore_disponibili, [])
+                if ruolo:
+                    dipendenti_dict[nome].ruoli.append(ruolo)
+            self.dipendenti = list(dipendenti_dict.values())
+        except sqlite3.Error as e:
+            print("Errore nel caricamento dei dipendenti:", e)
 
-    # Carica ruoli dal database
     def carica_ruoli_da_db(self):
-        cursor = self.connection.cursor()
-        cursor.execute("SELECT nome FROM ruoli")
-        rows = cursor.fetchall()
-        self.ruoli = [Ruolo(nome) for nome, in rows]
+        try:
+            cursor = self.connection.cursor()
+            cursor.execute("SELECT nome FROM ruoli")
+            rows = cursor.fetchall()
+            self.ruoli = [Ruolo(nome) for nome, in rows]
+        except sqlite3.Error as e:
+            print("Errore nel caricamento dei ruoli:", e)
+
+    def __del__(self):
+        self.connection.close()
 
     # CRUD Dipendenti
     def aggiungi_dipendente(self, nome, ore_disponibili, ruoli):
@@ -213,151 +226,146 @@ class GestioneRistorante:
         return max(0, ore_giornaliere)  # Assicura che le ore non siano negative
 
     def esporta_pianificazione_excel(self, file_path="pianificazione_settimanale.xlsx"):
-        pianificazione = self.genera_pianificazione_settimanale()
-        wb = Workbook()
-        
-        for giorno, assegnazioni in pianificazione:
-            ws = wb.create_sheet(title=giorno)
-            ws.append(["Stanza", "Dipendente", "Ore", "Ruolo"])
-            for stanza, persone_assegnate in assegnazioni:
-                for dipendente, ore, ruolo in persone_assegnate:
-                    ws.append([stanza, dipendente, ore, ruolo])
-        
-        if 'Sheet' in wb.sheetnames:
-            wb.remove(wb['Sheet'])
+        try:
+            pianificazione = self.genera_pianificazione_settimanale()
+            wb = Workbook()
+            
+            for giorno, assegnazioni in pianificazione:
+                ws = wb.create_sheet(title=giorno)
+                ws.append(["Stanza", "Dipendente", "Ore", "Ruolo"])
+                for stanza, persone_assegnate in assegnazioni:
+                    for dipendente, ore, ruolo in persone_assegnate:
+                        ws.append([stanza, dipendente, ore, ruolo])
+            
+            if 'Sheet' in wb.sheetnames:
+                wb.remove(wb['Sheet'])
+            
+            wb.save(file_path)
+        except Exception as e:
+            print("Errore nell'esportazione della pianificazione in Excel:", e)
 
-        wb.save(file_path)
-
-# Classe principale dell'applicazione GUI per la gestione del ristorante
 class GestioneRistoranteApp:
     def __init__(self, root):
+        # Inizializzazione della connessione al database
         self.connection = sqlite3.connect('gestione_ristorante.db')
         self.crea_tabelle()
-
         self.gestione = GestioneRistorante(self.connection)
 
+        # Configurazione della finestra principale
         self.root = root
         self.root.title("Gestione Ristorante")
-        self.root.minsize(1200, 600)
 
-        # Crea una finestra con scrollbar verticale
-        self.canvas = tk.Canvas(self.root)
-        self.scrollbar = tk.Scrollbar(self.root, orient="vertical", command=self.canvas.yview)
-        self.scrollable_frame = tk.Frame(self.canvas)
+        # Configura la dimensione della finestra per adattarsi allo schermo
+        screen_width = root.winfo_screenwidth()
+        screen_height = root.winfo_screenheight()
+        window_width = int(screen_width * 0.75)
+        window_height = int(screen_height * 0.75)
+        root.geometry(f"{window_width}x{window_height}")
 
-        self.scrollable_frame.bind(
-            "<Configure>",
-            lambda e: self.canvas.configure(scrollregion=self.canvas.bbox("all"))
-        )
+        # Configurazione del layout a griglia per distribuire le colonne uniformemente
+        self.root.grid_columnconfigure(0, weight=1, uniform="column")
+        self.root.grid_columnconfigure(1, weight=1, uniform="column")
+        self.root.grid_columnconfigure(2, weight=1, uniform="column")
 
-        self.canvas.create_window((0, 0), window=self.scrollable_frame, anchor="nw")
-        self.canvas.configure(yscrollcommand=self.scrollbar.set)
+        # Creazione dei frame per ciascuna sezione
+        self.frame_personale = tk.Frame(self.root, bd=2, relief="groove")
+        self.frame_personale.grid(row=0, column=0, sticky="nsew", padx=5, pady=5)
 
-        self.canvas.pack(side="left", fill="both", expand=True)
-        self.scrollbar.pack(side="right", fill="y")
+        self.frame_stanze = tk.Frame(self.root, bd=2, relief="groove")
+        self.frame_stanze.grid(row=0, column=1, sticky="nsew", padx=5, pady=5)
 
-        self.scrollable_frame.grid_columnconfigure(0, weight=1)
-        self.scrollable_frame.grid_columnconfigure(1, weight=1)
+        self.frame_ruoli = tk.Frame(self.root, bd=2, relief="groove")
+        self.frame_ruoli.grid(row=0, column=2, sticky="nsew", padx=5, pady=5)
 
-        # CRUD dipendenti (a sinistra)
-        self.frame_personale = tk.Frame(self.scrollable_frame, bd=2, relief="groove")
-        self.frame_personale.grid(row=0, column=0, sticky="nsew", padx=10, pady=10)
+        # Configurazione dell'espansione all'interno dei frame
+        for frame in [self.frame_personale, self.frame_stanze, self.frame_ruoli]:
+            frame.grid_rowconfigure(0, weight=1)
+            frame.grid_columnconfigure(0, weight=1)
 
-        self.label_personale = tk.Label(self.frame_personale, text="Gestione Personale", font=("Helvetica", 16))
-        self.label_personale.grid(row=0, column=0, columnspan=2, sticky="ew")
+        # Creazione dell'interfaccia per ciascuna sezione
+        self.crea_interfaccia_personale()
+        self.crea_interfaccia_stanze()
+        self.crea_interfaccia_ruoli()
+
+    def crea_interfaccia_personale(self):
+        # Configura i widget per la sezione Gestione Personale
+        tk.Label(self.frame_personale, text="Gestione Personale", font=("Helvetica", 16)).pack()
 
         self.label_nome = tk.Label(self.frame_personale, text="Nome:")
-        self.label_nome.grid(row=1, column=0, sticky="e")
-
+        self.label_nome.pack()
         self.entry_nome = tk.Entry(self.frame_personale)
-        self.entry_nome.grid(row=1, column=1, sticky="ew")
+        self.entry_nome.pack()
 
         self.label_ore = tk.Label(self.frame_personale, text="Ore Settimanali:")
-        self.label_ore.grid(row=2, column=0, sticky="e")
-
+        self.label_ore.pack()
         self.entry_ore = tk.Entry(self.frame_personale)
-        self.entry_ore.grid(row=2, column=1, sticky="ew")
+        self.entry_ore.pack()
 
         self.label_ruolo_personale = tk.Label(self.frame_personale, text="Ruolo:")
-        self.label_ruolo_personale.grid(row=3, column=0, sticky="e")
-
+        self.label_ruolo_personale.pack()
         self.listbox_ruoli_personale = tk.Listbox(self.frame_personale, selectmode=tk.MULTIPLE)
-        self.listbox_ruoli_personale.grid(row=3, column=1, sticky="ew")
+        self.listbox_ruoli_personale.pack()
 
         self.button_aggiungi_personale = tk.Button(self.frame_personale, text="Aggiungi Personale", command=self.aggiungi_personale)
-        self.button_aggiungi_personale.grid(row=4, column=0, columnspan=2, sticky="ew")
+        self.button_aggiungi_personale.pack()
 
         self.listbox_personale = tk.Listbox(self.frame_personale, width=40)
-        self.listbox_personale.grid(row=5, column=0, columnspan=2, sticky="ew")
+        self.listbox_personale.pack()
 
         self.button_rimuovi_personale = tk.Button(self.frame_personale, text="Rimuovi Personale", command=self.rimuovi_personale)
-        self.button_rimuovi_personale.grid(row=6, column=0, columnspan=2, sticky="ew")
+        self.button_rimuovi_personale.pack()
 
         self.button_modifica_personale = tk.Button(self.frame_personale, text="Modifica Personale", command=self.modifica_personale)
-        self.button_modifica_personale.grid(row=7, column=0, columnspan=2, sticky="ew")
+        self.button_modifica_personale.pack()
 
-        # CRUD stanze (a destra)
-        self.frame_stanze = tk.Frame(self.scrollable_frame, bd=2, relief="groove")
-        self.frame_stanze.grid(row=0, column=1, sticky="nsew", padx=10, pady=10)
-
-        self.label_stanze = tk.Label(self.frame_stanze, text="Gestione Stanze", font=("Helvetica", 16))
-        self.label_stanze.grid(row=0, column=0, columnspan=2, sticky="ew")
+    def crea_interfaccia_stanze(self):
+        # Configura i widget per la sezione Gestione Stanze
+        tk.Label(self.frame_stanze, text="Gestione Stanze", font=("Helvetica", 16)).pack()
 
         self.label_nome_stanza = tk.Label(self.frame_stanze, text="Nome Stanza:")
-        self.label_nome_stanza.grid(row=1, column=0, sticky="e")
-
+        self.label_nome_stanza.pack()
         self.entry_nome_stanza = tk.Entry(self.frame_stanze)
-        self.entry_nome_stanza.grid(row=1, column=1, sticky="ew")
+        self.entry_nome_stanza.pack()
 
         self.label_num_persone_ruolo = tk.Label(self.frame_stanze, text="Numero di persone per ruolo:")
-        self.label_num_persone_ruolo.grid(row=2, column=0, sticky="e")
-
+        self.label_num_persone_ruolo.pack()
         self.listbox_ruoli_stanze = tk.Listbox(self.frame_stanze, selectmode=tk.SINGLE)
-        self.listbox_ruoli_stanze.grid(row=2, column=1, sticky="ew")
+        self.listbox_ruoli_stanze.pack()
 
         self.entry_num_persone_ruolo = tk.Entry(self.frame_stanze)
-        self.entry_num_persone_ruolo.grid(row=3, column=1, sticky="ew")
+        self.entry_num_persone_ruolo.pack()
 
         self.button_aggiungi_stanza = tk.Button(self.frame_stanze, text="Aggiungi Stanza", command=self.aggiungi_stanza)
-        self.button_aggiungi_stanza.grid(row=4, column=0, columnspan=2, sticky="ew")
+        self.button_aggiungi_stanza.pack()
 
         self.listbox_stanze = tk.Listbox(self.frame_stanze, width=40)
-        self.listbox_stanze.grid(row=5, column=0, columnspan=2, sticky="ew")
+        self.listbox_stanze.pack()
 
         self.button_rimuovi_stanza = tk.Button(self.frame_stanze, text="Rimuovi Stanza", command=self.rimuovi_stanza)
-        self.button_rimuovi_stanza.grid(row=6, column=0, columnspan=2, sticky="ew")
+        self.button_rimuovi_stanza.pack()
 
-        # Gestione Ruoli (sotto)
-        self.frame_ruoli = tk.Frame(self.scrollable_frame, bd=2, relief="groove")
-        self.frame_ruoli.grid(row=1, column=0, columnspan=2, sticky="nsew", padx=10, pady=10)
-
-        self.label_ruoli = tk.Label(self.frame_ruoli, text="Gestione Ruoli", font=("Helvetica", 16))
-        self.label_ruoli.grid(row=0, column=0, columnspan=2, sticky="ew")
+    def crea_interfaccia_ruoli(self):
+        # Configura i widget per la sezione Gestione Ruoli
+        tk.Label(self.frame_ruoli, text="Gestione Ruoli", font=("Helvetica", 16)).pack()
 
         self.label_nome_ruolo = tk.Label(self.frame_ruoli, text="Nome Ruolo:")
-        self.label_nome_ruolo.grid(row=1, column=0, sticky="e")
-
+        self.label_nome_ruolo.pack()
         self.entry_nome_ruolo = tk.Entry(self.frame_ruoli)
-        self.entry_nome_ruolo.grid(row=1, column=1, sticky="ew")
+        self.entry_nome_ruolo.pack()
 
         self.button_aggiungi_ruolo = tk.Button(self.frame_ruoli, text="Aggiungi Ruolo", command=self.aggiungi_ruolo)
-        self.button_aggiungi_ruolo.grid(row=2, column=0, columnspan=2, sticky="ew")
+        self.button_aggiungi_ruolo.pack()
 
         self.listbox_ruoli = tk.Listbox(self.frame_ruoli, width=40)
-        self.listbox_ruoli.grid(row=3, column=0, columnspan=2, sticky="ew")
+        self.listbox_ruoli.pack()
 
         self.button_rimuovi_ruolo = tk.Button(self.frame_ruoli, text="Rimuovi Ruolo", command=self.rimuovi_ruolo)
-        self.button_rimuovi_ruolo.grid(row=4, column=0, columnspan=2, sticky="ew")
+        self.button_rimuovi_ruolo.pack()
 
         # Esportazione in Excel
         self.button_export_excel = tk.Button(self.frame_ruoli, text="Esporta Pianificazione in Excel",
                                              command=self.esporta_pianificazione_excel)
-        self.button_export_excel.grid(row=5, column=0, columnspan=2, sticky="ew")
-
-        # Aggiorna le liste
-        self.aggiorna_lista_personale()
-        self.aggiorna_lista_stanze()
-        self.aggiorna_lista_ruoli()
+        self.button_export_excel.pack()
 
     def crea_tabelle(self):
         cursor = self.connection.cursor()
