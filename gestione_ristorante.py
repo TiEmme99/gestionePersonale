@@ -2,6 +2,7 @@ import tkinter as tk
 from tkinter import messagebox
 import sqlite3
 import openpyxl
+import os
 from openpyxl import Workbook
 
 # Costanti per i giorni della settimana
@@ -31,39 +32,39 @@ class Ristorante:
         self.connection = connection
         self.orari_settimanali = {}
         self.carica_orari_da_db()
-
+    
     def carica_orari_da_db(self):
         try:
             cursor = self.connection.cursor()
-            cursor.execute("SELECT giorno, apertura, chiusura FROM orari_settimanali")
+            cursor.execute("SELECT giorno, ore_lavorative FROM orari_settimanali")
             rows = cursor.fetchall()
             for row in rows:
-                giorno, apertura, chiusura = row
-                self.orari_settimanali[giorno] = {"apertura": apertura, "chiusura": chiusura}
+                giorno, ore_lavorative = row
+                self.orari_settimanali[giorno] = {"ore_lavorative": ore_lavorative}
         except sqlite3.Error as e:
-            print("Errore nel caricamento degli orari:", e)
+            print("Errore nel caricamento degli orari")
 
-    def modifica_orario_giorno(self, giorno, apertura, chiusura):
+    def modifica_orario_giorno(self, giorno, ore_lavorative):
         if giorno in GIORNI_SETTIMANA:
-            self.orari_settimanali[giorno] = {"apertura": apertura, "chiusura": chiusura}
+            self.orari_settimanali[giorno] = {"ore_lavorative": ore_lavorative}
             try:
                 cursor = self.connection.cursor()
                 cursor.execute(
-                    "UPDATE orari_settimanali SET apertura=?, chiusura=? WHERE giorno=?",
-                    (apertura, chiusura, giorno)
+                    "UPDATE orari_settimanali SET ore_lavorative=? WHERE giorno=?",
+                    (ore_lavorative, giorno)
                 )
                 self.connection.commit()
                 return True
             except sqlite3.Error as e:
-                print("Errore nella modifica degli orari:", e)
+                print("Errore nella modifica degli orari")
                 return False
         return False
 
     def __str__(self):
         orari_str = "Orari Settimanali del Ristorante:\n"
         for giorno in GIORNI_SETTIMANA:
-            orari = self.orari_settimanali.get(giorno, {"apertura": "00:00", "chiusura": "00:00"})
-            orari_str += f"{giorno}: Apertura: {orari['apertura']}, Chiusura: {orari['chiusura']}\n"
+            orari = self.orari_settimanali.get(giorno, {"ore_lavorative": 0})
+            orari_str += f"{giorno}: Ore lavorative: {orari['ore_lavorative']}\n"
         return orari_str
 
 # Classe GestioneRistorante per gestire dipendenti, ruoli e stanze
@@ -77,15 +78,17 @@ class GestioneRistorante:
         self.orari = Ristorante(connection)
         self.carica_dipendenti_da_db()
         self.carica_ruoli_da_db()
+        self.carica_stanze_da_db()
 
     # Carica dipendenti dal database
     def carica_dipendenti_da_db(self):
         try:
             cursor = self.connection.cursor()
             cursor.execute("""
-                SELECT d.nome, d.ore_disponibili, r.nome FROM dipendenti d
-                LEFT JOIN dipendenti_ruoli dr ON d.nome = dr.dipendente_nome
-                LEFT JOIN ruoli r ON dr.ruolo_nome = r.nome
+                SELECT d.nome, d.ore_disponibili, r.nome 
+                FROM dipendenti d
+                LEFT JOIN dipendenti_ruoli dr ON d.id = dr.dipendente_id
+                LEFT JOIN ruoli r ON dr.ruolo_id = r.id
             """)
             rows = cursor.fetchall()
             dipendenti_dict = {}
@@ -96,7 +99,7 @@ class GestioneRistorante:
                     dipendenti_dict[nome].ruoli.append(ruolo)
             self.dipendenti = list(dipendenti_dict.values())
         except sqlite3.Error as e:
-            print("Errore nel caricamento dei dipendenti:", e)
+            print("Errore nel caricamento dei dipendenti")
 
     def carica_ruoli_da_db(self):
         try:
@@ -105,87 +108,265 @@ class GestioneRistorante:
             rows = cursor.fetchall()
             self.ruoli = [Ruolo(nome) for nome, in rows]
         except sqlite3.Error as e:
-            print("Errore nel caricamento dei ruoli:", e)
+            print("Errore nel caricamento dei ruoli")
 
     def __del__(self):
         self.connection.close()
 
+    def carica_stanze_da_db(self):
+        try:
+            cursor = self.connection.cursor()
+
+            # Carica tutte le stanze
+            cursor.execute("SELECT id, nome FROM stanze")
+            stanze_rows = cursor.fetchall()
+            self.stanze = {row[0]: row[1] for row in stanze_rows}  # {id: nome}
+
+            # Carica i ruoli associati alle stanze
+            cursor.execute("""
+                SELECT sr.stanza_id, r.nome, sr.numero_persone
+                FROM stanze_ruoli sr
+                JOIN ruoli r ON sr.ruolo_id = r.id
+            """)
+            stanze_ruoli_rows = cursor.fetchall()
+            self.num_persone_stanze_ruolo = {}
+
+            for stanza_id, ruolo_nome, numero_persone in stanze_ruoli_rows:
+                stanza_nome = self.stanze[stanza_id]
+                if stanza_nome not in self.num_persone_stanze_ruolo:
+                    self.num_persone_stanze_ruolo[stanza_nome] = {}
+                self.num_persone_stanze_ruolo[stanza_nome][ruolo_nome] = numero_persone
+
+        except sqlite3.Error as e:
+            print("Errore nel caricamento delle stanze")
+
     # CRUD Dipendenti
     def aggiungi_dipendente(self, nome, ore_disponibili, ruoli):
-        dipendente = Dipendente(nome, ore_disponibili, ruoli)
-        self.dipendenti.append(dipendente)
-        cursor = self.connection.cursor()
-        cursor.execute(
-            "INSERT INTO dipendenti (nome, ore_disponibili) VALUES (?, ?)",
-            (nome, ore_disponibili)
-        )
-        for ruolo in ruoli:
+        try:
+            cursor = self.connection.cursor()
+
+            # Aggiungi il dipendente nella tabella dipendenti
             cursor.execute(
-                "INSERT INTO dipendenti_ruoli (dipendente_nome, ruolo_nome) VALUES (?, ?)",
-                (nome, ruolo)
+                "INSERT INTO dipendenti (nome, ore_disponibili) VALUES (?, ?)",
+                (nome, ore_disponibili)
             )
-        self.connection.commit()
+            dipendente_id = cursor.lastrowid
+
+            # Aggiungi i ruoli del dipendente nella tabella dipendenti_ruoli
+            for ruolo_nome in ruoli:
+                cursor.execute("SELECT id FROM ruoli WHERE nome = ?", (ruolo_nome,))
+                ruolo_row = cursor.fetchone()
+                if ruolo_row:
+                    ruolo_id = ruolo_row[0]
+                    cursor.execute(
+                        "INSERT INTO dipendenti_ruoli (dipendente_id, ruolo_id) VALUES (?, ?)",
+                        (dipendente_id, ruolo_id)
+                    )
+                else:
+                    print(f"Ruolo '{ruolo_nome}' non trovato nel database")
+
+            self.connection.commit()
+
+            # Aggiorna la struttura in memoria
+            dipendente = Dipendente(nome, ore_disponibili, ruoli)
+            self.dipendenti.append(dipendente)
+
+        except sqlite3.Error as e:
+            print("Errore durante l'aggiunta del dipendente")
+            self.connection.rollback()
+
 
     def rimuovi_dipendente(self, nome):
-        self.dipendenti = [d for d in self.dipendenti if d.nome != nome]
-        cursor = self.connection.cursor()
-        cursor.execute("DELETE FROM dipendenti WHERE nome=?", (nome,))
-        cursor.execute("DELETE FROM dipendenti_ruoli WHERE dipendente_nome=?", (nome,))
-        self.connection.commit()
+        try:
+            cursor = self.connection.cursor()
+
+            # Recupera l'ID del dipendente da eliminare
+            cursor.execute("SELECT id FROM dipendenti WHERE nome=?", (nome,))
+            dipendente_row = cursor.fetchone()
+
+            if not dipendente_row:
+                print(f"Dipendente '{nome}' non trovato nel database.")
+                return False
+
+            dipendente_id = dipendente_row[0]
+
+            # Elimina il dipendente e i suoi ruoli associati
+            cursor.execute("DELETE FROM dipendenti WHERE id=?", (dipendente_id,))
+            cursor.execute("DELETE FROM dipendenti_ruoli WHERE dipendente_id=?", (dipendente_id,))
+            self.connection.commit()
+
+            # Aggiorna la struttura in memoria
+            self.dipendenti = [d for d in self.dipendenti if d.nome != nome]
+            return True
+
+        except sqlite3.Error as e:
+            print("Errore durante la rimozione del dipendente")
+            self.connection.rollback()
+            return False
+
 
     def modifica_dipendente(self, vecchio_nome, nuovo_nome, nuove_ore, nuovi_ruoli):
-        cursor = self.connection.cursor()
-        cursor.execute("UPDATE dipendenti SET nome=?, ore_disponibili=? WHERE nome=?", (nuovo_nome, nuove_ore, vecchio_nome))
-        cursor.execute("DELETE FROM dipendenti_ruoli WHERE dipendente_nome=?", (vecchio_nome,))
-        for ruolo in nuovi_ruoli:
-            cursor.execute("INSERT INTO dipendenti_ruoli (dipendente_nome, ruolo_nome) VALUES (?, ?)", (nuovo_nome, ruolo))
-        self.connection.commit()
+        try:
+            cursor = self.connection.cursor()
+
+            # Recupera l'ID del dipendente da modificare
+            cursor.execute("SELECT id FROM dipendenti WHERE nome=?", (vecchio_nome,))
+            dipendente_row = cursor.fetchone()
+
+            if not dipendente_row:
+                print(f"Dipendente '{vecchio_nome}' non trovato nel database.")
+                return False
+
+            dipendente_id = dipendente_row[0]
+
+            # Aggiorna i dati del dipendente
+            cursor.execute(
+                "UPDATE dipendenti SET nome=?, ore_disponibili=? WHERE id=?",
+                (nuovo_nome, nuove_ore, dipendente_id)
+            )
+
+            # Rimuovi i vecchi ruoli del dipendente
+            cursor.execute("DELETE FROM dipendenti_ruoli WHERE dipendente_id=?", (dipendente_id,))
+
+            # Aggiungi i nuovi ruoli del dipendente
+            for ruolo_nome in nuovi_ruoli:
+                cursor.execute("SELECT id FROM ruoli WHERE nome=?", (ruolo_nome,))
+                ruolo_row = cursor.fetchone()
+                if ruolo_row:
+                    ruolo_id = ruolo_row[0]
+                    cursor.execute(
+                        "INSERT INTO dipendenti_ruoli (dipendente_id, ruolo_id) VALUES (?, ?)",
+                        (dipendente_id, ruolo_id)
+                    )
+                else:
+                    print(f"Ruolo '{ruolo_nome}' non trovato nel database.")
+
+            self.connection.commit()
+
+            # Aggiorna la struttura in memoria
+            for dipendente in self.dipendenti:
+                if dipendente.nome == vecchio_nome:
+                    dipendente.nome = nuovo_nome
+                    dipendente.ore_disponibili = nuove_ore
+                    dipendente.ruoli = nuovi_ruoli
+                    break
+
+            return True
+
+        except sqlite3.Error as e:
+            print("Errore durante la modifica del dipendente")
+            self.connection.rollback()
+            return False
+
 
     # CRUD Ruoli
     def aggiungi_ruolo(self, nome):
-        ruolo = Ruolo(nome)
-        self.ruoli.append(ruolo)
-        cursor = self.connection.cursor()
-        cursor.execute("INSERT INTO ruoli (nome) VALUES (?)", (nome,))
-        self.connection.commit()
+        try:
+            cursor = self.connection.cursor()
+            cursor.execute("INSERT INTO ruoli (nome) VALUES (?)", (nome,))
+            self.connection.commit()
+            ruolo = Ruolo(nome)
+            self.ruoli.append(ruolo)
+        except sqlite3.Error as e:
+            messagebox.showerror("Errore", f"Errore durante l'aggiunta del ruolo")
+            self.connection.rollback()
 
     def rimuovi_ruolo(self, nome):
-        self.ruoli = [r for r in self.ruoli if r.nome != nome]
-        cursor = self.connection.cursor()
-        cursor.execute("DELETE FROM ruoli WHERE nome=?", (nome,))
-        self.connection.commit()
+        try:
+            cursor = self.connection.cursor()
+            cursor.execute("SELECT id FROM ruoli WHERE nome=?", (nome,))
+            ruolo_row = cursor.fetchone()
+
+            if not ruolo_row:
+                print(f"Ruolo '{nome}' non trovato nel database.")
+                return False
+
+            ruolo_id = ruolo_row[0]
+            cursor.execute("DELETE FROM dipendenti_ruoli WHERE ruolo_id=?", (ruolo_id,))
+            cursor.execute("DELETE FROM stanze_ruoli WHERE ruolo_id=?", (ruolo_id,))
+            cursor.execute("DELETE FROM ruoli WHERE id=?", (ruolo_id,))
+            self.connection.commit()
+            self.ruoli = [r for r in self.ruoli if r.nome != nome]
+        except sqlite3.Error as e:
+            print("Errore durante la rimozione del ruolo")
+            self.connection.rollback()
 
     # CRUD Stanze
     def aggiungi_stanza(self, nome_stanza, persone_ruoli):
-        self.stanze.append(nome_stanza)
-        self.num_persone_stanze_ruolo[nome_stanza] = persone_ruoli
-        cursor = self.connection.cursor()
-        cursor.execute("INSERT INTO stanze (nome) VALUES (?)", (nome_stanza,))
-        for ruolo, numero_persone in persone_ruoli.items():
-            cursor.execute(
-                "INSERT INTO stanze_ruoli (stanza_nome, ruolo_nome, numero_persone) VALUES (?, ?, ?)",
-                (nome_stanza, ruolo, numero_persone)
-            )
-        self.connection.commit()
+        try:
+            cursor = self.connection.cursor()
+            cursor.execute("INSERT INTO stanze (nome) VALUES (?)", (nome_stanza,))
+            stanza_id = cursor.lastrowid
+
+            for ruolo_nome, numero_persone in persone_ruoli.items():
+                cursor.execute("SELECT id FROM ruoli WHERE nome=?", (ruolo_nome,))
+                ruolo_row = cursor.fetchone()
+                if ruolo_row:
+                    ruolo_id = ruolo_row[0]
+                    cursor.execute(
+                        "INSERT INTO stanze_ruoli (stanza_id, ruolo_id, numero_persone) VALUES (?, ?, ?)",
+                        (stanza_id, ruolo_id, numero_persone)
+                    )
+
+            self.connection.commit()
+            self.stanze[stanza_id] = nome_stanza
+            self.num_persone_stanze_ruolo[nome_stanza] = persone_ruoli
+        except sqlite3.Error as e:
+            print("Errore durante l'aggiunta della stanza")
+            self.connection.rollback()
 
     def modifica_stanza(self, nome_stanza, persone_ruoli):
-        self.num_persone_stanze_ruolo[nome_stanza] = persone_ruoli
-        cursor = self.connection.cursor()
-        cursor.execute("DELETE FROM stanze_ruoli WHERE stanza_nome=?", (nome_stanza,))
-        for ruolo, numero_persone in persone_ruoli.items():
-            cursor.execute(
-                "INSERT INTO stanze_ruoli (stanza_nome, ruolo_nome, numero_persone) VALUES (?, ?, ?)",
-                (nome_stanza, ruolo, numero_persone)
-            )
-        self.connection.commit()
+        try:
+            cursor = self.connection.cursor()
+
+            # Recupera l'ID della stanza
+            stanza_id = next((id for id, nome in self.stanze.items() if nome == nome_stanza), None)
+
+            if stanza_id is None:
+                print(f"Stanza '{nome_stanza}' non trovata nel database.")
+                return False
+
+            # Rimuove i ruoli attuali associati alla stanza
+            cursor.execute("DELETE FROM stanze_ruoli WHERE stanza_id=?", (stanza_id,))
+
+            # Aggiunge i nuovi ruoli
+            for ruolo_nome, numero_persone in persone_ruoli.items():
+                cursor.execute("SELECT id FROM ruoli WHERE nome=?", (ruolo_nome,))
+                ruolo_row = cursor.fetchone()
+                if ruolo_row:
+                    ruolo_id = ruolo_row[0]
+                    cursor.execute(
+                        "INSERT INTO stanze_ruoli (stanza_id, ruolo_id, numero_persone) VALUES (?, ?, ?)",
+                        (stanza_id, ruolo_id, numero_persone)
+                    )
+
+            self.connection.commit()
+
+            # Aggiorna la struttura in memoria
+            self.num_persone_stanze_ruolo[nome_stanza] = persone_ruoli
+            return True
+        except sqlite3.Error as e:
+            print("Errore durante la modifica della stanza:", e)
+            self.connection.rollback()
+            return False
 
     def rimuovi_stanza(self, nome_stanza):
-        self.stanze.remove(nome_stanza)
-        del self.num_persone_stanze_ruolo[nome_stanza]
-        cursor = self.connection.cursor()
-        cursor.execute("DELETE FROM stanze WHERE nome=?", (nome_stanza,))
-        cursor.execute("DELETE FROM stanze_ruoli WHERE stanza_nome=?", (nome_stanza,))
-        self.connection.commit()
+        try:
+            cursor = self.connection.cursor()
+            stanza_id = next((id for id, nome in self.stanze.items() if nome == nome_stanza), None)
+
+            if stanza_id is None:
+                print(f"Stanza '{nome_stanza}' non trovata nel database.")
+                return False
+
+            cursor.execute("DELETE FROM stanze WHERE id=?", (stanza_id,))
+            cursor.execute("DELETE FROM stanze_ruoli WHERE stanza_id=?", (stanza_id,))
+            self.connection.commit()
+            del self.stanze[stanza_id]
+            del self.num_persone_stanze_ruolo[nome_stanza]
+        except sqlite3.Error as e:
+            print("Errore durante la rimozione della stanza")
+            self.connection.rollback()
 
     # Pianificazione settimanale
     def genera_pianificazione_settimanale(self):
@@ -225,24 +406,28 @@ class GestioneRistorante:
         ore_giornaliere = (chiusura_totale_minuti - apertura_totale_minuti) / 60
         return max(0, ore_giornaliere)  # Assicura che le ore non siano negative
 
-    def esporta_pianificazione_excel(self, file_path="pianificazione_settimanale.xlsx"):
+    def esporta_pianificazione_excel(self):
         try:
-            pianificazione = self.genera_pianificazione_settimanale()
+            pianificazione = []  # Pianificazione settimanale
             wb = Workbook()
-            
-            for giorno, assegnazioni in pianificazione:
+
+            for giorno in GIORNI_SETTIMANA:
                 ws = wb.create_sheet(title=giorno)
-                ws.append(["Stanza", "Dipendente", "Ore", "Ruolo"])
-                for stanza, persone_assegnate in assegnazioni:
-                    for dipendente, ore, ruolo in persone_assegnate:
-                        ws.append([stanza, dipendente, ore, ruolo])
-            
-            if 'Sheet' in wb.sheetnames:
-                wb.remove(wb['Sheet'])
-            
+                ws.append(["Stanza", "Ruolo", "Numero Persone"])
+
+                for stanza, persone_ruoli in self.num_persone_stanze_ruolo.items():
+                    for ruolo, numero_persone in persone_ruoli.items():
+                        ws.append([stanza, ruolo, numero_persone])
+
+            if "Sheet" in wb.sheetnames:
+                wb.remove(wb["Sheet"])
+
+            download_path = os.path.join(os.path.expanduser("~"), "Downloads")
+            file_path = os.path.join(download_path, "pianificazione_settimanale.xlsx")
             wb.save(file_path)
+            messagebox.showinfo("Esportazione completata", f"La pianificazione è stata esportata in: {file_path}")
         except Exception as e:
-            print("Errore nell'esportazione della pianificazione in Excel:", e)
+            print("Errore durante l'esportazione")
 
 class GestioneRistoranteApp:
     def __init__(self, root):
@@ -286,6 +471,10 @@ class GestioneRistoranteApp:
         self.crea_interfaccia_personale()
         self.crea_interfaccia_stanze()
         self.crea_interfaccia_ruoli()
+        # Aggiornamento dei widget con i dati del database
+        self.aggiorna_lista_personale()
+        self.aggiorna_lista_stanze()
+        self.aggiorna_lista_ruoli()
 
     def crea_interfaccia_personale(self):
         # Configura i widget per la sezione Gestione Personale
@@ -372,7 +561,7 @@ class GestioneRistoranteApp:
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS dipendenti (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                nome TEXT NOT NULL,
+                nome TEXT UNIQUE NOT NULL,
                 ore_disponibili INTEGER NOT NULL
             )
         """)
@@ -384,31 +573,32 @@ class GestioneRistoranteApp:
         """)
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS dipendenti_ruoli (
-                dipendente_nome TEXT NOT NULL,
-                ruolo_nome TEXT NOT NULL,
-                FOREIGN KEY (dipendente_nome) REFERENCES dipendenti(nome),
-                FOREIGN KEY (ruolo_nome) REFERENCES ruoli(nome)
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                dipendente_id INTEGER NOT NULL,
+                ruolo_id INTEGER NOT NULL,
+                FOREIGN KEY (dipendente_id) REFERENCES dipendenti(id),
+                FOREIGN KEY (ruolo_id) REFERENCES ruoli(id)
             )
         """)
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS stanze (
-                nome TEXT PRIMARY KEY
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                nome TEXT UNIQUE NOT NULL
             )
         """)
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS stanze_ruoli (
-                stanza_nome TEXT NOT NULL,
-                ruolo_nome TEXT NOT NULL,
+                stanza_id INTEGER NOT NULL,
+                ruolo_id INTEGER NOT NULL,
                 numero_persone INTEGER NOT NULL,
-                FOREIGN KEY (stanza_nome) REFERENCES stanze(nome),
-                FOREIGN KEY (ruolo_nome) REFERENCES ruoli(nome)
+                FOREIGN KEY (stanza_id) REFERENCES stanze(id),
+                FOREIGN KEY (ruolo_id) REFERENCES ruoli(id)
             )
         """)
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS orari_settimanali (
                 giorno TEXT PRIMARY KEY,
-                apertura TEXT NOT NULL,
-                chiusura TEXT NOT NULL
+                ore_lavorative INTEGER NOT NULL
             )
         """)
         self.connection.commit()
@@ -475,7 +665,7 @@ class GestioneRistoranteApp:
             messagebox.showerror("Errore", "Il numero di persone deve essere un numero intero positivo!")
 
     def rimuovi_stanza(self):
-        nome_stanza = self.entry_nome_stanza.get()
+        nome_stanza = self.entry_nome_stanza.get(tk.ACTIVE).split(" - ")[0]
         self.gestione.rimuovi_stanza(nome_stanza)
         self.aggiorna_lista_stanze()
         self.entry_nome_stanza.delete(0, tk.END)
